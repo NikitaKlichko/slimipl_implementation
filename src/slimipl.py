@@ -23,7 +23,7 @@ class SlimIPL(pl.LightningModule):
         lambda_ratio = 0.7,
         initial_dropout = 0.5,
         final_dropout = 0.1,
-        learning_rate = 2e-4
+        learning_rate = 2e-4,
     ):
         super().__init__()
 
@@ -43,7 +43,8 @@ class SlimIPL(pl.LightningModule):
         self.final_dropout = final_dropout
         self.learning_rate = learning_rate
         
-        self.current_step = 0
+        self.train_step = 0
+        self.val_step = 0
         self.cache_filled = False
         self.blank_id = self.decoder.num_classes_with_blank-1
 
@@ -163,8 +164,10 @@ class SlimIPL(pl.LightningModule):
             
             loss = supervised_loss + self.lambda_ratio * unsupervised_loss
             
-        self.current_step += 1
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, on_epoch=False, on_step=True)
+
+        self.train_step += 1
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -181,6 +184,8 @@ class SlimIPL(pl.LightningModule):
         gt = self.tokenizer.ids_to_text([x[x!=0].tolist() for x in input_text])
         wer = self._word_error_rate(decode_preds, gt)
         self.log("val_wer", wer, on_epoch=True, on_step=False)
+        
+        self.val_step += 1
 
         return val_loss
     

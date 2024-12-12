@@ -4,6 +4,8 @@ from torch.utils.data import Dataset
 import nemo.collections.asr as nemo_asr
 import torchaudio
 from copy import deepcopy
+import logging
+import sys
 
 
 class SpeechDataset(Dataset):
@@ -132,3 +134,20 @@ def create_model_from_checkpoint(model_path, device):
     preprocessor = deepcopy(ctc_conformer.preprocessor).to(device)
     del ctc_conformer
     return encoder, decoder, tokenizer, spec_augment, preprocessor
+
+def get_stdout_logger(name: str, level: str = "INFO") -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        
+        formatter = logging.Formatter(
+            fmt="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+
+        logger.addHandler(handler)
+
+    return logger
