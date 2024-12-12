@@ -3,6 +3,7 @@ import json
 from torch.utils.data import Dataset
 import nemo.collections.asr as nemo_asr
 import torchaudio
+from copy import deepcopy
 
 
 class SpeechDataset(Dataset):
@@ -126,7 +127,7 @@ def create_model_from_checkpoint(model_path, device):
     ctc_conformer = nemo_asr.models.EncDecCTCModelBPE.restore_from(model_path)
     encoder = deepcopy(ctc_conformer.encoder).to(device)
     decoder = deepcopy(ctc_conformer.decoder).to(device)
-    tokenizer = deepcopy(ctc_conformer.tokenizer).to(device)
+    tokenizer = deepcopy(ctc_conformer.tokenizer)
     spec_augment = deepcopy(ctc_conformer.spec_augmentation).to(device)
     preprocessor = deepcopy(ctc_conformer.preprocessor).to(device)
     del ctc_conformer

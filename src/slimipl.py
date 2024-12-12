@@ -7,6 +7,8 @@ import random
 import editdistance
 from ctc_loss import CTCLoss
 
+import logging
+
 class SlimIPL(pl.LightningModule):
     def __init__(
         self,
@@ -15,12 +17,9 @@ class SlimIPL(pl.LightningModule):
         tokenizer,
         preprocessor,
         spec_augmentation,
-        # labeled_dataset,
-        # unlabeled_dataset,
         unlabeled_dataloader,
         cache_size = 1000,
         cache_update_prob = 0.2,
-        supervised_updates = 20000,
         lambda_ratio = 0.7,
         initial_dropout = 0.5,
         final_dropout = 0.1,
@@ -34,14 +33,11 @@ class SlimIPL(pl.LightningModule):
         self.preprocessor = preprocessor
         self.spec_augmentation = spec_augmentation
         self.unlabeled_dataloader = unlabeled_dataloader
-        # self.labeled_dataset = labeled_dataset
-        # self.unlabeled_dataset = unlabeled_dataset
         
         self.cache_size = cache_size
         self.cache_update_prob = cache_update_prob
         self.cache = deque(maxlen=cache_size)
         
-        self.supervised_updates = supervised_updates
         self.lambda_ratio = lambda_ratio
         self.initial_dropout = initial_dropout
         self.final_dropout = final_dropout
@@ -51,7 +47,7 @@ class SlimIPL(pl.LightningModule):
         self.cache_filled = False
         self.blank_id = self.decoder.num_classes_with_blank-1
 
-        self.ctc_loss = CTCLoss(blank=self.blank_id, 
+        self.ctc_loss = CTCLoss(num_classes=self.blank_id, 
                                     reduction='mean_batch', 
                                     zero_infinity=True)
         
@@ -95,7 +91,9 @@ class SlimIPL(pl.LightningModule):
         self.eval()
         with torch.no_grad():
             input_audio, input_audio_length = batch
-            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio)
+            input_audio = input_audio.to(self.device)
+            input_audio_length = input_audio_length.to(self.device)
+            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_length)
             pseudo_labels = self._form_labels_batch(preds)
         self.train()
         return pseudo_labels
@@ -114,6 +112,9 @@ class SlimIPL(pl.LightningModule):
         clean_ids = []
         for sample in predictions:
             tokens_no_blank = sample[sample != self.blank_id]
+            if tokens_no_blank.numel() == 0:
+                clean_ids.append(tokens_no_blank)
+                continue
             different_from_next = torch.cat([
                 tokens_no_blank[1:] != tokens_no_blank[:-1],
                 torch.tensor([True], device=tokens_no_blank.device)
@@ -121,7 +122,7 @@ class SlimIPL(pl.LightningModule):
             decoded_tokens = tokens_no_blank[different_from_next]
             clean_ids.append(decoded_tokens)
         return clean_ids
-        
+
     def _decode_batch(self, predictions):
         return self._clean_ids(predictions)
 
@@ -129,39 +130,10 @@ class SlimIPL(pl.LightningModule):
         clean_ids = self._decode_batch(predictions)
         return self._pad_sequences(clean_ids, pad_value=0)
 
-    # def _form_labels_batch(self, predictions):
-    #         cleand_ids = self._decode_batch(predictions)
-    #         toks_len = [len(x) for x in cleand_ids]
-    #         max_tokens_len = max(toks_len)
-    #         toks = []
-
-    #         for tokens_i in cleand_ids:
-    #             tokens_i_len = len(tokens_i)
-    #             if tokens_i_len < max_tokens_len:
-    #                 pad = (0, max_tokens_len - tokens_i_len)
-    #                 tokens_i = torch.nn.functional.pad(tokens_i, pad, value=0)
-    #             toks.append(tokens_i)
-
-    #         tokens = torch.stack(toks)
-    #         tokens_lengths = torch.tensor(toks_len).unsqueeze(1)
-    #         return (tokens, tokens_lengths,)
-    
-    # def _decode_batch(self, decoded):
-    #     clean_ids = []
-    #     for sample in decoded:
-    #         tokens_no_blank = sample[(sample != self.blank_id)]
-    #         different_from_next = torch.cat([
-    #                                         tokens_no_blank[1:] != tokens_no_blank[:-1],
-    #                                         torch.tensor([True])
-    #                                     ])
-    #         decoded_tokens = tokens_no_blank[different_from_next]
-    #         clean_ids.append(decoded_tokens)
-    #     return clean_ids
-
     def training_step(self, batch, batch_idx):
         if not self.cache_filled:
             input_audio, input_audio_len, input_text, input_text_len = batch
-            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio)
+            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_len)
             loss = self.ctc_loss(log_probs=logits, targets=input_text, input_lengths=enc_len, target_lengths=input_text_len)
             
             if len(self.cache) < self.cache_size:
@@ -199,15 +171,16 @@ class SlimIPL(pl.LightningModule):
         self.eval()
         with torch.no_grad():
             input_audio, input_audio_len, input_text, input_text_len = batch
-            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio)
+            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_len)
 
         val_loss = self.ctc_loss(log_probs=logits, targets=input_text, input_lengths=enc_len, target_lengths=input_text_len)
         self.log("val_loss", val_loss, on_epoch=True, on_step=False)
 
         decode_preds = self._decode_batch(preds)
-        gt = self.tokenizer.ids_to_text([x[x!=0].tolist() for x in decode_preds])
+        decode_preds = self.tokenizer.ids_to_text([x.tolist() for x in decode_preds])
+        gt = self.tokenizer.ids_to_text([x[x!=0].tolist() for x in input_text])
         wer = self._word_error_rate(decode_preds, gt)
-        self.log("wer", wer, on_epoch=True, on_step=False)
+        self.log("val_wer", wer, on_epoch=True, on_step=False)
 
         return val_loss
     
