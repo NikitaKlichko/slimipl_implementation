@@ -161,6 +161,9 @@ class SlimIPL(pl.LightningModule):
             logits_unlabeled, enc_len_ulabeled, _ = self.forward(input_signal=in_audio_unlabeled, input_signal_length=in_audio_len_unlabeled)
             unsupervised_loss = self.ctc_loss(log_probs=logits_unlabeled, targets=in_text_pseudo,
                                              input_lengths=enc_len_ulabeled, target_lengths=in_text_len_pseudo)
+
+            self.log('unsupervised_train_loss', unsupervised_loss, on_epoch=False, on_step=True)
+            self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
             
             loss = supervised_loss + self.lambda_ratio * unsupervised_loss
             
@@ -200,6 +203,7 @@ class SlimIPL(pl.LightningModule):
         )
 
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1e4, eta_min=2e-4)
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
         return [optimizer], [scheduler]
 
     def _word_error_rate(self, hypotheses, references, use_cer=False):

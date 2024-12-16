@@ -30,10 +30,10 @@ pseudo_loader = DataLoader(pseudo_ds, batch_size=train_bs, shuffle=False, collat
 
 my_model = SlimIPL(encoder, decoder, tokenizer, preprocessor, spec_augment, 
                     unlabeled_dataloader = pseudo_loader,
-                    cache_size = int(len(train_ds) // train_bs * 0.1),
-                    cache_update_prob = 0.2,
-                    lambda_ratio = 0.7,
-                    initial_dropout = 0.3,
+                    cache_size = 1000 // train_bs,
+                    cache_update_prob = 0.15,
+                    lambda_ratio = 2,
+                    initial_dropout = 0.5,
                     final_dropout = 0.1,
                     learning_rate = 2e-4,
 )
@@ -42,6 +42,7 @@ checkpoint_callback = ModelCheckpoint(
     monitor="val_wer",  
     dirpath="./ckpts/",  
     filename="best-checkpoint-{epoch:02d}-{val_wer:.3f}",  
+    save_last=True, 
     save_top_k=1, 
     mode="min", 
     save_weights_only=True 
