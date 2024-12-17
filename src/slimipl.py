@@ -6,8 +6,9 @@ from collections import deque
 import random
 import editdistance
 from ctc_loss import CTCLoss
+from utils import get_stdout_logger
 
-import logging
+logging = get_stdout_logger("slimplog", "INFO")
 
 class SlimIPL(pl.LightningModule):
     def __init__(
@@ -21,9 +22,9 @@ class SlimIPL(pl.LightningModule):
         cache_size = 1000,
         cache_update_prob = 0.2,
         lambda_ratio = 0.7,
-        initial_dropout = 0.5,
+        initial_dropout = 0.2,
         final_dropout = 0.1,
-        learning_rate = 2e-4,
+        learning_rate = 2e-4
     ):
         super().__init__()
 
@@ -67,6 +68,9 @@ class SlimIPL(pl.LightningModule):
                 f"{self} Arguments ``input_signal`` and ``input_signal_length`` are mutually exclusive "
                 " with ``processed_signal`` and ``processed_signal_len`` arguments."
             )
+        input_signal = input_signal.to(self.device)
+        input_signal_length = input_signal_length.to(self.device)
+
         if not has_processed_signal:
             processed_signal, processed_signal_length = self.preprocessor(
                 input_signal=input_signal,
@@ -92,8 +96,6 @@ class SlimIPL(pl.LightningModule):
         self.eval()
         with torch.no_grad():
             input_audio, input_audio_length = batch
-            input_audio = input_audio.to(self.device)
-            input_audio_length = input_audio_length.to(self.device)
             logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_length)
             pseudo_labels = self._form_labels_batch(preds)
         self.train()
@@ -146,10 +148,14 @@ class SlimIPL(pl.LightningModule):
                 self._set_dropout(self.final_dropout)   
         else:
             in_audio_labeled, in_audio_len_labeled, in_text_labeled, in_text_len_labeled = batch
-            logits_labeled, enc_len_labeled, _ = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
+            logits_labeled, enc_len_labeled, labeled_preds = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
             supervised_loss = self.ctc_loss(log_probs=logits_labeled, targets=in_text_labeled,
                                              input_lengths=enc_len_labeled, target_lengths=in_text_len_labeled)
+            self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
             
+            supervised_wer = self.compute_wer(labeled_preds, in_text_labeled, False)
+            self.log('supervised_train_wer', supervised_wer, on_epoch=False, on_step=True)
+
             cached_batch = random.choice(list(self.cache))
             in_audio_unlabeled, in_audio_len_unlabeled, in_text_pseudo, in_text_len_pseudo = cached_batch 
             
@@ -158,20 +164,36 @@ class SlimIPL(pl.LightningModule):
                 new_pseudo_labels = self._generate_pseudo_labels(new_unlabeled_batch)
                 self.cache.append(new_unlabeled_batch + new_pseudo_labels)
                 
-            logits_unlabeled, enc_len_ulabeled, _ = self.forward(input_signal=in_audio_unlabeled, input_signal_length=in_audio_len_unlabeled)
+            logits_unlabeled, enc_len_ulabeled, unlabeled_preds = self.forward(input_signal=in_audio_unlabeled, input_signal_length=in_audio_len_unlabeled)
             unsupervised_loss = self.ctc_loss(log_probs=logits_unlabeled, targets=in_text_pseudo,
                                              input_lengths=enc_len_ulabeled, target_lengths=in_text_len_pseudo)
-
             self.log('unsupervised_train_loss', unsupervised_loss, on_epoch=False, on_step=True)
-            self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
+
+            unsupervised_wer = self.compute_wer(unlabeled_preds, in_text_pseudo, False)
+            self.log('unsupervised_train_wer', unsupervised_wer, on_epoch=False, on_step=True)
+
+            mean_wer = (unsupervised_wer + supervised_wer) / 2
+            self.log('mean_train_wer', mean_wer, on_epoch=False, on_step=True)
             
             loss = supervised_loss + self.lambda_ratio * unsupervised_loss
-            
-        self.log('train_loss', loss, on_epoch=False, on_step=True)
+            self.log('total_train_loss', loss, on_epoch=False, on_step=True)
 
-        self.train_step += 1
+            self.train_step += 1
 
         return loss
+
+    def compute_wer(self, predicitons, target_text, log=True):
+        decode_preds = self._decode_batch(predicitons)
+        decode_preds = self.tokenizer.ids_to_text([x.tolist() for x in decode_preds])
+
+        gt = self.tokenizer.ids_to_text([x[x!=0].tolist() for x in target_text])
+        wer = self._word_error_rate(decode_preds, gt)
+        if log:   
+            logging.info(f"\n")
+            logging.info(f"reference:{gt[0]}")
+            logging.info(f"predicted:{decode_preds[0]}")
+
+        return wer
 
     def validation_step(self, batch, batch_idx):
         self.eval()
@@ -180,15 +202,14 @@ class SlimIPL(pl.LightningModule):
             logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_len)
 
         val_loss = self.ctc_loss(log_probs=logits, targets=input_text, input_lengths=enc_len, target_lengths=input_text_len)
+   
         self.log("val_loss", val_loss, on_epoch=True, on_step=False)
 
-        decode_preds = self._decode_batch(preds)
-        decode_preds = self.tokenizer.ids_to_text([x.tolist() for x in decode_preds])
-        gt = self.tokenizer.ids_to_text([x[x!=0].tolist() for x in input_text])
-        wer = self._word_error_rate(decode_preds, gt)
-        self.log("val_wer", wer, on_epoch=True, on_step=False)
-        
+        val_wer = self.compute_wer(preds, input_text)
+
         self.val_step += 1
+
+        self.log("val_wer", val_wer, on_epoch=True, on_step=False)
 
         return val_loss
     
@@ -196,7 +217,7 @@ class SlimIPL(pl.LightningModule):
         parameters = list(self.encoder.parameters()) + list(self.decoder.parameters())
         optimizer = torch.optim.AdamW(
         parameters,
-        lr=2e-4,
+        lr=self.learning_rate,
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=0.01

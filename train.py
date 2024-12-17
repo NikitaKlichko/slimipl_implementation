@@ -26,7 +26,7 @@ val_ds = SpeechDataset(val_path, tokenizer, is_labeled=True)
 data_module = DataModule([train_ds], [val_ds], batch_size=train_bs, n_workers=n_works)
 
 pseudo_ds = SpeechDataset(unlabeld_path, tokenizer, is_labeled=False)
-pseudo_loader = DataLoader(pseudo_ds, batch_size=train_bs, shuffle=False, collate_fn=pseudo_ds._speech_collate_fn, num_workers=n_works)
+pseudo_loader = DataLoader(pseudo_ds, batch_size=train_bs, shuffle=True, collate_fn=pseudo_ds._speech_collate_fn, num_workers=n_works)
 
 my_model = SlimIPL(encoder, decoder, tokenizer, preprocessor, spec_augment, 
                     unlabeled_dataloader = pseudo_loader,
@@ -41,20 +41,20 @@ my_model = SlimIPL(encoder, decoder, tokenizer, preprocessor, spec_augment,
 checkpoint_callback = ModelCheckpoint(
     monitor="val_wer",  
     dirpath="./ckpts/",  
-    filename="best-checkpoint-{epoch:02d}-{val_wer:.3f}",  
-    save_last=True, 
+    filename="best-checkpoint-{epoch:02d}-{val_wer:.3f}",
+    save_last=True,  
     save_top_k=1, 
     mode="min", 
     save_weights_only=True 
 )
 
 trainer = pl.Trainer(
-    max_epochs=10,
+    max_epochs=50,
     logger=logger,
     callbacks=[checkpoint_callback],
     devices=1,
-    accelerator="gpu",
-    precision="bf16", 
+    accelerator='gpu',
+    precision='bf16', 
     accumulate_grad_batches=4,
     enable_model_summary=True,
     # limit_train_batches=0.1, 
