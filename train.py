@@ -16,7 +16,7 @@ val_path = "..."
 unlabeld_path = "..."
 model_path = "..."
 
-train_bs = 32
+train_bs = 16
 n_works = 4
 
 encoder, decoder, tokenizer, spec_augment, preprocessor = create_model_from_checkpoint(model_path, device)
@@ -31,11 +31,11 @@ pseudo_loader = DataLoader(pseudo_ds, batch_size=train_bs, shuffle=True, collate
 my_model = SlimIPL(encoder, decoder, tokenizer, preprocessor, spec_augment, 
                     unlabeled_dataloader = pseudo_loader,
                     cache_size = 1000 // train_bs,
-                    cache_update_prob = 0.15,
-                    lambda_ratio = 2,
+                    supervised_updates = 10,
+                    cache_update_prob = 0.1,
                     initial_dropout = 0.5,
                     final_dropout = 0.1,
-                    learning_rate = 2e-4,
+                    learning_rate = 1e-4,
 )
 
 checkpoint_callback = ModelCheckpoint(
@@ -49,16 +49,14 @@ checkpoint_callback = ModelCheckpoint(
 )
 
 trainer = pl.Trainer(
-    max_epochs=50,
+    max_epochs=100,
     logger=logger,
     callbacks=[checkpoint_callback],
     devices=1,
-    accelerator='gpu',
-    precision='bf16', 
+    accelerator="gpu",
+    precision="bf16", 
     accumulate_grad_batches=4,
     enable_model_summary=True,
-    # limit_train_batches=0.1, 
-    # limit_val_batches=0.1,  
     check_val_every_n_epoch=1,
     log_every_n_steps=5,
 )

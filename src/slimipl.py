@@ -7,6 +7,7 @@ import random
 import editdistance
 from ctc_loss import CTCLoss
 from utils import get_stdout_logger
+import pickle
 
 logging = get_stdout_logger("slimplog", "INFO")
 
@@ -19,10 +20,12 @@ class SlimIPL(pl.LightningModule):
         preprocessor,
         spec_augmentation,
         unlabeled_dataloader,
+        supervised_updates=20000,
+        n_l_updates = 1,
+        n_u_updates = 2,
         cache_size = 1000,
         cache_update_prob = 0.2,
-        lambda_ratio = 0.7,
-        initial_dropout = 0.2,
+        initial_dropout = 0.5,
         final_dropout = 0.1,
         learning_rate = 2e-4
     ):
@@ -34,12 +37,14 @@ class SlimIPL(pl.LightningModule):
         self.preprocessor = preprocessor
         self.spec_augmentation = spec_augmentation
         self.unlabeled_dataloader = unlabeled_dataloader
+        self.supervised_updates = supervised_updates
         
         self.cache_size = cache_size
         self.cache_update_prob = cache_update_prob
-        self.cache = deque(maxlen=cache_size)
+        self.n_l_updates = n_l_updates
+        self.n_u_updates = n_u_updates
+        self.cache = set()
         
-        self.lambda_ratio = lambda_ratio
         self.initial_dropout = initial_dropout
         self.final_dropout = final_dropout
         self.learning_rate = learning_rate
@@ -47,6 +52,8 @@ class SlimIPL(pl.LightningModule):
         self.train_step = 0
         self.val_step = 0
         self.cache_filled = False
+        self.cntr_n_l = 0
+        self.cntr_n_u = 0
         self.blank_id = self.decoder.num_classes_with_blank-1
 
         self.ctc_loss = CTCLoss(num_classes=self.blank_id, 
@@ -134,53 +141,82 @@ class SlimIPL(pl.LightningModule):
         return self._pad_sequences(clean_ids, pad_value=0)
 
     def training_step(self, batch, batch_idx):
-        if not self.cache_filled:
-            input_audio, input_audio_len, input_text, input_text_len = batch
-            logits, enc_len, preds = self.forward(input_signal=input_audio, input_signal_length=input_audio_len)
-            loss = self.ctc_loss(log_probs=logits, targets=input_text, input_lengths=enc_len, target_lengths=input_text_len)
-            
-            if len(self.cache) < self.cache_size:
-                unlabeled_batch = next(iter(self.unlabeled_dataloader))
-                pseudo_labels = self._generate_pseudo_labels(unlabeled_batch)
-                self.cache.append(unlabeled_batch + pseudo_labels)
-            else:
-                self.cache_filled = True
-                self._set_dropout(self.final_dropout)   
-        else:
-            in_audio_labeled, in_audio_len_labeled, in_text_labeled, in_text_len_labeled = batch
-            logits_labeled, enc_len_labeled, labeled_preds = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
-            supervised_loss = self.ctc_loss(log_probs=logits_labeled, targets=in_text_labeled,
-                                             input_lengths=enc_len_labeled, target_lengths=in_text_len_labeled)
-            self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
-            
-            supervised_wer = self.compute_wer(labeled_preds, in_text_labeled, False)
-            self.log('supervised_train_wer', supervised_wer, on_epoch=False, on_step=True)
+        in_audio_labeled, in_audio_len_labeled, in_text_labeled, in_text_len_labeled = batch
 
-            cached_batch = random.choice(list(self.cache))
-            in_audio_unlabeled, in_audio_len_unlabeled, in_text_pseudo, in_text_len_pseudo = cached_batch 
-            
-            if random.random() < self.cache_update_prob:
-                new_unlabeled_batch = next(iter(self.unlabeled_dataloader))
-                new_pseudo_labels = self._generate_pseudo_labels(new_unlabeled_batch)
-                self.cache.append(new_unlabeled_batch + new_pseudo_labels)
-                
-            logits_unlabeled, enc_len_ulabeled, unlabeled_preds = self.forward(input_signal=in_audio_unlabeled, input_signal_length=in_audio_len_unlabeled)
-            unsupervised_loss = self.ctc_loss(log_probs=logits_unlabeled, targets=in_text_pseudo,
-                                             input_lengths=enc_len_ulabeled, target_lengths=in_text_len_pseudo)
-            self.log('unsupervised_train_loss', unsupervised_loss, on_epoch=False, on_step=True)
-
-            unsupervised_wer = self.compute_wer(unlabeled_preds, in_text_pseudo, False)
-            self.log('unsupervised_train_wer', unsupervised_wer, on_epoch=False, on_step=True)
-
-            mean_wer = (unsupervised_wer + supervised_wer) / 2
-            self.log('mean_train_wer', mean_wer, on_epoch=False, on_step=True)
-            
-            loss = supervised_loss + self.lambda_ratio * unsupervised_loss
-            self.log('total_train_loss', loss, on_epoch=False, on_step=True)
+        if self.train_step < self.supervised_updates:
+            logits, enc_len, preds = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
+            supervised_loss = self.ctc_loss(log_probs=logits, targets=in_text_labeled, input_lengths=enc_len, target_lengths=in_text_len_labeled)
 
             self.train_step += 1
 
-        return loss
+            self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
+
+            return supervised_loss
+            
+        elif not self.cache_filled:
+            if len(self.cache) < self.cache_size:
+                unlabeled_batch = next(iter(self.unlabeled_dataloader))
+                pseudo_labels = self._generate_pseudo_labels(unlabeled_batch)
+                self.cache.add(unlabeled_batch + pseudo_labels)
+
+                logits_labeled, enc_len_labeled, labeled_preds = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
+                supervised_loss = self.ctc_loss(log_probs=logits_labeled, targets=in_text_labeled,
+                                                input_lengths=enc_len_labeled, target_lengths=in_text_len_labeled)
+
+                self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
+
+                return supervised_loss
+            else:
+                self.cache_filled = True
+                logging.info(f"Cache of size {self.cache_size} is full")
+            
+                self._set_dropout(self.final_dropout)
+                
+                return None   
+        else:
+            if self.cntr_n_l < self.n_l_updates:
+                logits_labeled, enc_len_labeled, labeled_preds = self.forward(input_signal=in_audio_labeled, input_signal_length=in_audio_len_labeled)
+                supervised_loss = self.ctc_loss(log_probs=logits_labeled, targets=in_text_labeled,
+                                                input_lengths=enc_len_labeled, target_lengths=in_text_len_labeled)
+
+                self.log('supervised_train_loss', supervised_loss, on_epoch=False, on_step=True)
+                
+                supervised_wer = self.compute_wer(labeled_preds, in_text_labeled, False)
+
+                self.log('supervised_train_wer', supervised_wer, on_epoch=False, on_step=True)
+
+                self.cntr_n_l += 1
+                logging.info(f"counter labeled: {self.cntr_n_l}")
+
+                return supervised_loss
+            else:
+                cached_batch = random.choice(list(self.cache))
+
+                in_audio_unlabeled, in_audio_len_unlabeled, in_text_pseudo, in_text_len_pseudo = cached_batch 
+                
+                if random.random() < self.cache_update_prob:
+                    self.cache.remove(cached_batch)
+                    new_unlabeled_batch = next(iter(self.unlabeled_dataloader))
+                    new_pseudo_labels = self._generate_pseudo_labels(new_unlabeled_batch)
+                    self.cache.add(new_unlabeled_batch + new_pseudo_labels)
+                    
+                logits_unlabeled, enc_len_ulabeled, unlabeled_preds = self.forward(input_signal=in_audio_unlabeled, input_signal_length=in_audio_len_unlabeled)
+                unsupervised_loss = self.ctc_loss(log_probs=logits_unlabeled, targets=in_text_pseudo,
+                                                input_lengths=enc_len_ulabeled, target_lengths=in_text_len_pseudo)
+
+                self.log('unsupervised_train_loss', unsupervised_loss, on_epoch=False, on_step=True)
+
+                unsupervised_wer = self.compute_wer(unlabeled_preds, in_text_pseudo, False)
+
+                self.log('unsupervised_train_wer', unsupervised_wer, on_epoch=False, on_step=True)
+
+                self.cntr_n_u += 1
+
+                if (self.cntr_n_u == self.n_u_updates) and (self.cntr_n_l == self.n_l_updates):
+                    self.cntr_n_u = 0
+                    self.cntr_n_l = 0
+
+                return unsupervised_loss
 
     def compute_wer(self, predicitons, target_text, log=True):
         decode_preds = self._decode_batch(predicitons)
@@ -204,7 +240,6 @@ class SlimIPL(pl.LightningModule):
         val_loss = self.ctc_loss(log_probs=logits, targets=input_text, input_lengths=enc_len, target_lengths=input_text_len)
    
         self.log("val_loss", val_loss, on_epoch=True, on_step=False)
-
         val_wer = self.compute_wer(preds, input_text)
 
         self.val_step += 1
@@ -218,14 +253,14 @@ class SlimIPL(pl.LightningModule):
         optimizer = torch.optim.AdamW(
         parameters,
         lr=self.learning_rate,
-        betas=(0.9, 0.999),
+        betas=(0.9, 0.98),
         eps=1e-8,
-        weight_decay=0.01
+        weight_decay=0.001
         )
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1e4, eta_min=2e-4)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
-        return [optimizer], [scheduler]
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1e4, eta_min=2e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+        return [optimizer], [{"scheduler": scheduler,"monitor": "val_wer","interval": "epoch","frequency": 1}]
 
     def _word_error_rate(self, hypotheses, references, use_cer=False):
         scores = 0
