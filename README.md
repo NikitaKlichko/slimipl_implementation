@@ -3,5 +3,5 @@ Implementation of the [SlimIPL](https://arxiv.org/abs/2010.11524) algorithm in P
 
 Launch  example:
 ```
-python src/train.py --config config/config.yaml
+python train.py --config config.yaml
 ```
