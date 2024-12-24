@@ -20,14 +20,15 @@ class SlimIPL(pl.LightningModule):
         preprocessor,
         spec_augmentation,
         unlabeled_dataloader,
-        supervised_updates=20000,
+        optimizer, 
+        scheduler=None,
+        supervised_updates=10000,
         n_l_updates = 1,
-        n_u_updates = 2,
+        n_u_updates = 4,
         cache_size = 1000,
-        cache_update_prob = 0.2,
+        cache_update_prob = 0.1,
         initial_dropout = 0.5,
         final_dropout = 0.1,
-        learning_rate = 2e-4
     ):
         super().__init__()
 
@@ -47,7 +48,8 @@ class SlimIPL(pl.LightningModule):
         
         self.initial_dropout = initial_dropout
         self.final_dropout = final_dropout
-        self.learning_rate = learning_rate
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         
         self.train_step = 0
         self.val_step = 0
@@ -249,18 +251,10 @@ class SlimIPL(pl.LightningModule):
         return val_loss
     
     def configure_optimizers(self):
-        parameters = list(self.encoder.parameters()) + list(self.decoder.parameters())
-        optimizer = torch.optim.AdamW(
-        parameters,
-        lr=self.learning_rate,
-        betas=(0.9, 0.98),
-        eps=1e-8,
-        weight_decay=0.001
-        )
-
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1e4, eta_min=2e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
-        return [optimizer], [{"scheduler": scheduler,"monitor": "val_wer","interval": "epoch","frequency": 1}]
+        if self.scheduler:
+            return [self.optimizer], [{"scheduler": self.scheduler, "monitor": "val_wer", "interval": "epoch", "frequency": 1}]
+        else:
+            return [self.optimizer]
 
     def _word_error_rate(self, hypotheses, references, use_cer=False):
         scores = 0
